@@ -1,52 +1,66 @@
 # Hardware Design
 
+This document originally described the RP2040/Pico prototype. The current ESP32-S2 design keeps
+the same USB mux and power-button ideas, but also adds direct ATX PSU control through the 24-pin
+connector so the board can power the BC250 system up and down.
+
 ## Block diagram
 
 ```
- 5VSB (from ATX connector or always-on USB header)
+ 5VSB (from ATX 24-pin connector)
    │
-   ├──────────────────────────────► Pico VSYS  (powers the MCU)
+   ├──────────────────────────────► ESP32-S2 5V / regulator input (powers the MCU)
    │
    └──────────────────────────────► J1 VBUS    (powers the USB device always)
+
+ ATX 24-pin
+   PS_ON# (green) ── driver transistor/MOSFET ──► ESP32-S2 GPIO16
+   GND    (black) ──────────────────────────────► ESP32-S2 GND
 
  J1 (USB Type-A Female — device input)
    │ D+/D─
    ▼
  U2  TS3USB221  2:1 USB switch
-   ├─ Port A (D+/D─) ──────────────► Pico USB D+/D─  (monitoring path)
+   ├─ Port A (D+/D─) ──────────────► ESP32-S2 / monitor-side path
    └─ Port B (D+/D─) ──────────────► J2 D+/D─        (PC passthrough path)
-   SEL ◄──────────────────────────── Pico GP15
+   SEL ◄──────────────────────────── ESP32-S2 GPIO15
 
- J2 (USB Type-A Male or header pins — to PC USB port)
+ J2 (USB Type-A Male or header pins — to BC250 USB port)
    VBUS ─── R2 ─── node ─── R3 ─── GND
                     │
-                    └──────────────► Pico GP14  (PC VBUS sense)
+                    └──────────────► ESP32-S2 GPIO14  (BC250 VBUS sense)
 
- Pico GP13 ─── R1(1 kΩ) ─── Q1 Base
-                              Q1 Collector ──► J3 pin 1  (MOB PWR_BTN)
-                              Q1 Emitter   ──► GND
- J3 pin 2 ──► GND                              (MOB PWR_BTN return)
+ J1 VBUS ─── R4 ─── node ─── R5 ─── GND
+                    │
+                    └──────────────► ESP32-S2 GPIO12  (controller VBUS sense)
+
+ ESP32-S2 GPIO13 ─── R1(1 kΩ) ─── Q1 Base
+                                 Q1 Collector ──► J3 pin 1  (BC250 PWR_BTN)
+                                 Q1 Emitter   ──► GND
+ J3 pin 2 ──► GND                              (BC250 PWR_BTN return)
 ```
 
 ---
 
 ## Component choices
 
-### U1 — RP2040 / Raspberry Pi Pico
+### U1 — ESP32-S2 / LOLIN S2 Mini
 
-The Raspberry Pi Pico is chosen because:
-- TinyUSB host stack is mature and well-tested on RP2040.
-- Dual-core; USB host runs on core 0 while the state machine runs on core 0 via the
-  cooperative TinyUSB task loop (no RTOS needed).
-- 3.3 V I/O, cheap, breadboard-friendly.
-- USB D+/D─ pins are accessible on the micro-USB connector pads.
-
-> **Pico W** can be used instead if Wi-Fi is desired for future features (e.g. remote
-> wake, MQTT status).
+The current prototype uses an ESP32-S2 board because:
+- It is already available in this build.
+- It has enough GPIOs for USB mux control, BC250 power-button drive, controller VBUS sense,
+  BC250 VBUS sense, and ATX PSU enable.
+- USB host enumeration is not required for the current design because controller power-on is
+  detected through VBUS presence.
+- It includes a usable onboard LED for host online/offline indication.
 
 ### U2 — TI TS3USB221
 
 A 2:1 USB 2.0 bidirectional mux/switch.
+
+If using the common TS3USB221 breakout module sold on AliExpress and similar sites,
+the `S` select control may be exposed as a small pad on the back side of the breakout
+rather than on the main header edge. Check both sides of the board before wiring GP15.
 
 | Pin  | Connection                                     |
 |------|------------------------------------------------|
@@ -66,26 +80,57 @@ Package: VSON (DRC) 10-pin 3×3 mm, or UQFN (RSE) 10-pin 2×1.5 mm.
 
 ### Q1 — NPN transistor (BC547 / 2N2222)
 
-Drives the motherboard PWR_BTN header.  The transistor collector is wired to one header
+Drives the BC250 motherboard PWR_BTN header.  The transistor collector is wired to one header
 pin; emitter to GND; the other header pin is GND on the motherboard itself.  When the
-Pico drives GP13 HIGH the transistor conducts and momentarily shorts the header — exactly
+ESP32-S2 drives GPIO13 HIGH the transistor conducts and momentarily shorts the header — exactly
 as pressing the front-panel power button does.
 
-### Voltage divider R2/R3 — VBUS sensing
+### Q2 — ATX `PS_ON#` driver
 
-PC USB VBUS is 5 V; Pico GPIO is 3.3 V tolerant (max 3.63 V).
+Add a second transistor or small MOSFET stage between the ESP32-S2 and the ATX `PS_ON#` wire.
+The board must not drive the ATX control line directly. The safe pattern is:
+- ESP32-S2 GPIO16 drives the transistor gate/base
+- The transistor pulls `PS_ON#` into its asserted state
+- ATX ground is shared with the ESP32-S2 ground
+
+This lets the ESP32-S2 turn the PSU on before it pulses the BC250 power button.
+
+Example with an NPN transistor such as 2N2222 or BC547:
+
+```
+ESP32-S2 GPIO16 ── R4 (1 kΩ) ──► Q2 base
+ESP32-S2 GND  ─────────────────► Q2 emitter
+Q2 collector  ─────────────────► ATX PS_ON# (green wire)
+ATX GND       ─────────────────► ESP32-S2 GND (common ground)
+```
+
+Behavior:
+- GPIO16 LOW: Q2 off, `PS_ON#` released, PSU off
+- GPIO16 HIGH: Q2 on, `PS_ON#` pulled low, PSU on
+
+That matches the current firmware default. If your driver stage inverts the logic, use the
+`PSU_ON_ACTIVE_LOW` firmware option instead of changing the hardware notes.
+
+### Voltage divider R2/R3 and R4/R5 — VBUS sensing
+
+USB VBUS is 5 V; ESP32-S2 GPIO is 3.3 V only.
 
 ```
 R2 = 10 kΩ,  R3 = 10 kΩ
 V_sense = 5 V × 10 / (10 + 10) = 2.5 V   ✓ safely below 3.3 V, clearly > 1.65 V threshold
 ```
 
-### Power — 5VSB
+Use the same divider values for controller-side VBUS sensing on GPIO12.
+
+### Power — 5VSB and ATX `PS_ON#`
 
 The ATX standby rail (pin 9 on the 24-pin connector, purple wire) provides 5 V even
 when the PC is off.  Route this to:
-- Pico VSYS (which feeds the onboard 3.3 V LDO and runs the MCU).
+- The ESP32-S2 board power input / regulator path.
 - J1 VBUS (so the plugged-in USB device stays powered and its D+ pullup is visible).
+
+The ATX `PS_ON#` line (pin 16, green wire) is the PSU control signal. Drive it only through
+the Q2 transistor stage described above.
 
 A 500 mA polyfuse between 5VSB and J1 VBUS protects against a shorted cable.
 
@@ -98,13 +143,13 @@ A 500 mA polyfuse between 5VSB and J1 VBUS protects against a shorted cable.
 
 | GPIO | Direction | Function                            |
 |------|-----------|-------------------------------------|
-| GP0  | TX        | UART debug output (optional)        |
-| GP1  | RX        | UART debug input  (optional)        |
-| GP13 | OUT       | Power button drive (to Q1 base)     |
-| GP14 | IN        | PC VBUS sense (via R2/R3 divider)   |
-| GP15 | OUT       | USB switch SEL (0=Pico / 1=PC)      |
+| GPIO13 | OUT     | BC250 power button drive            |
+| GPIO14 | IN      | BC250 USB VBUS sense                |
+| GPIO15 | OUT     | USB switch SEL (0=ESP32 / 1=BC250) |
+| GPIO12 | IN      | Controller-side VBUS sense          |
+| GPIO16 | OUT     | ATX `PS_ON#` driver control         |
 
-USB D+/D─ are the Pico's dedicated USB PHY pins (not GPIOs).
+An onboard LED can be used for host status if its pin does not conflict with the signals above.
 
 ---
 
@@ -129,4 +174,5 @@ For a quick prototype without a custom PCB:
 - Avoid routing D+/D─ near switching signals.
 - Place decoupling caps (100 nF) on VCC of U2 close to the IC.
 - Silkscreen labels for J3 polarity (PWR_BTN header is not polarised but label anyway).
-- Consider a status LED on GP16 to show current state (solid=passthrough, blink=monitoring).
+- Keep the ATX `PS_ON#` driver physically close to the 24-pin connector entry.
+- Consider test pads for `5VSB`, `PS_ON#`, `GPIO14` sense, and `GPIO16` control.

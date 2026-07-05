@@ -1,8 +1,8 @@
 # USB Wake Switch — BC250 / Steam Controller
 
-A small RP2040-based board that monitors a USB port for device insertion, wakes a desktop
-PC by momentarily shorting the motherboard power button header, then transparently routes
-the USB device to the PC for the remainder of the session.  When the PC shuts down the
+A small microcontroller-based board that monitors a USB port for device insertion, wakes a
+desktop PC by momentarily shorting the motherboard power button header, then transparently
+routes the USB device to the PC for the remainder of the session. When the PC shuts down the
 board returns to monitoring mode.
 
 ## Why not just leave the device plugged in to the PC?
@@ -72,12 +72,21 @@ shutdown just because the Steam Controller is still sitting in the USB port.
 ```
 .
 ├── README.md
+├── build.sh             ← root firmware build wrapper (CMake + Pico SDK)
+├── build-esp32s2.sh     ← root firmware build wrapper (PlatformIO + ESP32-S2)
+├── firmware-esp32s2/
+│   ├── README.md          ← ESP32-S2 build/wiring notes
+│   ├── build.sh           ← ESP32-S2 local build/upload helper
+│   ├── platformio.ini
+│   └── src/
+│       └── main.cpp       ← ESP32-S2 state machine (VBUS-sense device detect)
 ├── hardware/
 │   ├── README.md          ← schematic description & design notes
 │   └── BOM.md             ← bill of materials
 └── firmware/
     ├── README.md          ← build & flash instructions
     ├── CMakeLists.txt
+    ├── platformio.ini     ← optional/experimental
     └── src/
         ├── main.c         ← state machine
         ├── usb_host.c/h   ← TinyUSB host callbacks
@@ -85,12 +94,19 @@ shutdown just because the Steam Controller is still sitting in the USB port.
         └── tusb_config.h  ← TinyUSB compile-time config
 ```
 
+### Firmware targets
+
+- RP2040/Pico firmware: [firmware/README.md](firmware/README.md)
+- ESP32-S2 firmware (LOLIN S2 Mini): [firmware-esp32s2/README.md](firmware-esp32s2/README.md)
+
 ---
 
 ## Quick start
 
 1. Wire the hardware per `hardware/README.md`.
-2. Follow `firmware/README.md` to build and flash the `.uf2`.
+2. Choose firmware target:
+    - RP2040/Pico: run `./build.sh` (or follow [firmware/README.md](firmware/README.md))
+    - ESP32-S2: run `./build-esp32s2.sh` (or follow [firmware-esp32s2/README.md](firmware-esp32s2/README.md))
 3. Connect the Pico's VSYS to the PC's ATX 5VSB rail so the board stays powered when
    the PC is off.
 4. Plug the Steam Controller into the board's Type-A input jack.

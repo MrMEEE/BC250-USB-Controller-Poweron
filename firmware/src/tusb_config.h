@@ -29,8 +29,13 @@
 #define CFG_TUH_HID_EPIN_BUFSIZE  64
 
 // ── Host: generic/vendor class ───────────────────────────────────────────────
-// Enables mounting of devices that don't match HID, CDC, etc.
-// Useful for detecting non-HID controllers or future device types.
-#define CFG_TUH_VENDOR          1
+// NOTE: Disabled due to TinyUSB version compatibility issues with vendor_host.h.
+// The generic mount/umount callbacks (tuh_mount_cb/tuh_umount_cb) work for all
+// device classes, so vendor class support is not needed for basic enumeration.
+#define CFG_TUH_VENDOR          0
+
+// ── Board-specific: roothub port for host mode ──────────────────────────────
+// On Pico (RP2040), there is one USB port: port 0
+#define BOARD_TUH_RHPORT        0
 
 #endif /* TUSB_CONFIG_H_ */

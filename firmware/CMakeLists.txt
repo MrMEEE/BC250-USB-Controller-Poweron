@@ -1,7 +1,24 @@
 cmake_minimum_required(VERSION 3.13)
 
+# Resolve Pico SDK path with this precedence:
+# 1) -DPICO_SDK_PATH=... (project-local CMake cache)
+# 2) PICO_SDK_PATH environment variable
+# 3) default: $HOME/pico-sdk
+if(NOT DEFINED PICO_SDK_PATH)
+    if(DEFINED ENV{PICO_SDK_PATH})
+        set(PICO_SDK_PATH $ENV{PICO_SDK_PATH})
+    else()
+        set(PICO_SDK_PATH "$ENV{HOME}/pico-sdk")
+    endif()
+endif()
+
+if(NOT EXISTS "${PICO_SDK_PATH}/external/pico_sdk_import.cmake")
+    message(FATAL_ERROR
+        "Pico SDK not found at '${PICO_SDK_PATH}'. Set PICO_SDK_PATH or pass -DPICO_SDK_PATH=/path/to/pico-sdk")
+endif()
+
 # Must be included before project()
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 project(usb_wake_switch C CXX ASM)
 set(CMAKE_C_STANDARD 11)

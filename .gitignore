@@ -1,0 +1,28 @@
+# Build artifacts
+firmware/build/
+firmware/pico-sdk/
+firmware-esp32s2/.pio/
+
+# Build output
+*.elf
+*.uf2
+*.hex
+*.bin
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Ninja
+.ninja_deps
+.ninja_log

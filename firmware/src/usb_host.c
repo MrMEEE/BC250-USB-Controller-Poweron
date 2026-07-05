@@ -1,6 +1,21 @@
 #include "usb_host.h"
 #include "tusb.h"
 #include <stdio.h>
+#include "pico/time.h"
+
+// ── Timer callback for TinyUSB ──────────────────────────────────────────────
+// TinyUSB calls these functions to get the current time in milliseconds.
+// Pico SDK provides get_absolute_time() and to_ms_since_boot() which we use here.
+
+uint32_t board_millis(void)
+{
+    return to_ms_since_boot(get_absolute_time());
+}
+
+uint32_t tusb_time_millis_api(void)
+{
+    return to_ms_since_boot(get_absolute_time());
+}
 
 // Volatile because it is written from TinyUSB callbacks and read from the main loop.
 static volatile bool s_device_connected = false;

@@ -19,9 +19,28 @@ sudo apt install cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential
 
 ### Get the Pico SDK
 
+Option 1: Clone manually (recommended):
+
 ```bash
 git clone https://github.com/raspberrypi/pico-sdk --recurse-submodules ~/pico-sdk
-export PICO_SDK_PATH=~/pico-sdk
+```
+
+Option 2: Let the build script download it automatically:
+
+```bash
+cd firmware
+./build.sh --fetch-sdk
+```
+
+This will create `firmware/pico-sdk/` and use it automatically. If Git is available, it will clone with submodules. Otherwise, it will download a ZIP and manually fetch TinyUSB.
+
+The project defaults to `~/pico-sdk`, so no extra configuration is needed if you keep
+the SDK there.
+
+If your SDK is elsewhere, set `PICO_SDK_PATH` (or pass `-DPICO_SDK_PATH=...` to CMake):
+
+```bash
+export PICO_SDK_PATH=/path/to/pico-sdk
 ```
 
 Add the export to `~/.bashrc` or `~/.profile` to make it permanent.
@@ -30,27 +49,71 @@ Add the export to `~/.bashrc` or `~/.profile` to make it permanent.
 
 ## Build
 
+Primary build flow is CMake + Pico SDK.
+
+Build:
+
 ```bash
 cd firmware
-mkdir build && cd build
+./build.sh
+```
+
+Build + upload (RP2040 in BOOTSEL mode):
+
+```bash
+cd firmware
+./build.sh --upload
+```
+
+If needed, pass the mounted RP2040 path explicitly:
+
+```bash
+./build.sh --upload --uf2-target /media/$USER/RPI-RP2
+```
+
+Manual CMake build:
+
+```bash
+cd firmware
+mkdir -p build && cd build
 cmake ..
-make -j$(nproc)
+cmake --build . --parallel "$(nproc)"
 ```
 
 This produces `build/usb_wake_switch.uf2`.
+
+`platformio.ini` is kept for experiments, but PlatformIO currently does not support
+this project's Pico SDK framework configuration for board `pico` on this machine.
 
 ---
 
 ## Flash
 
-1. Hold the **BOOTSEL** button on the Pico while plugging it in to USB (or press BOOTSEL
-   while pressing the onboard reset button if you added SW1).
-2. A mass-storage device named **RPI-RP2** will appear.
-3. Copy the `.uf2` file to it:
+1. **Put the Pico in BOOTSEL mode:**
+   - Hold the **BOOTSEL** button while plugging in USB, OR
+   - Hold BOOTSEL while pressing the onboard reset button
 
-```bash
-cp build/usb_wake_switch.uf2 /media/$USER/RPI-RP2/
-```
+2. A mass-storage device named **RPI-RP2** will appear. Verify with:
+   ```bash
+   mount | grep RPI
+   ```
+
+3. Flash using the build script:
+
+   **Automatic (waits for mount if not yet present):**
+   ```bash
+   ./build.sh --upload --wait-for-pico
+   ```
+
+   **If mount is already present:**
+   ```bash
+   ./build.sh --upload
+   ```
+
+   **Manual copy (if using explicit mount path):**
+   ```bash
+   cp build/usb_wake_switch.uf2 /media/$USER/RPI-RP2/
+   ```
 
 The Pico will reboot automatically and start running the firmware.
 
