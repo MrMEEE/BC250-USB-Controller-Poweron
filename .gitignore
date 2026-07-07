@@ -17,6 +17,11 @@ firmware-esp32s2/.pio/
 *~
 .DS_Store
 
+# Local capture artifacts
+tools/captures/
+__pycache__/
+*.pyc
+
 # CMake
 CMakeCache.txt
 CMakeFiles/

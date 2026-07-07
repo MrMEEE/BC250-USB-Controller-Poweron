@@ -2,36 +2,43 @@
 
 This firmware targets ESP32-S2 boards such as LOLIN S2 Mini.
 
-It keeps the same high-level behavior as the RP2040 firmware:
-- Detect controller insertion
+It performs the full wake/power-switching flow:
+- Detect controller wake activity
 - Enable the ATX PSU through the 24-pin connector
 - Wait 1 second for PSU rails to settle
 - Pulse the BC250 motherboard power button
 - Switch USB mux to BC250 after boot
 - Turn PSU off and return USB to monitor mode after BC250 shuts down
 
-## Important difference from RP2040 version
+## Wake trigger strategy
 
-This implementation detects insertion using a GPIO VBUS-sense signal (`DEV_VBUS_SENSE_PIN`) rather than USB host enumeration.
+For a wireless controller + always-powered USB dongle, VBUS does not indicate controller wake.
+The recommended approach is:
+- Capture dongle HID reports on a local PC
+- Identify a stable "controller turned on / input activity" signature
+- Port that signature rule into ESP32 wake logic
 
-You must wire a 5V-to-3.3V divider from the controller-side VBUS line into `DEV_VBUS_SENSE_PIN`.
+The current firmware uses the raw ESP-IDF USB host library to watch the dongle on the monitor
+path and applies the same silence-to-burst HID prefix rule validated on the PC.
+`DEV_VBUS_SENSE_PIN` remains as a fallback if USB host initialization fails.
 
 ## Default pin mapping
 
 Configured in [platformio.ini](platformio.ini):
-- `USB_SWITCH_SEL_PIN = GPIO15`
+- `USB_SWITCH_SEL_PIN = GPIO10`
 - `PWR_BTN_PIN = GPIO13`
-- `PC_VBUS_SENSE_PIN = GPIO14`
+- `PC_VBUS_SENSE_PIN = GPIO9`
 - `DEV_VBUS_SENSE_PIN = GPIO12`
-- `PSU_ON_PIN = GPIO16`
+- `PSU_ON_PIN = GPIO8`
+- `WAKE_DETECT_FROM_HID = 1` (raw USB host detector enabled)
 
 All VBUS sense pins must use resistor dividers to stay within 3.3V GPIO limits.
 
 ## Power sequence
 
-The ESP32-S2 firmware now uses this sequence:
+The target ESP32-S2 firmware sequence is:
 1. Steam Controller powers up
-2. ESP32-S2 detects controller-side VBUS
+2. ESP32-S2 detects HID wake signature on the monitor path
 3. Assert PSU enable
 4. Wait 1 second for PSU rails to settle
 5. Pulse BC250 power button
@@ -43,6 +50,9 @@ When BC250 shuts down:
 2. Turn PSU off
 3. Switch USB mux back to ESP32-S2 monitoring path
 4. Stay dormant until the controller is unplugged
+
+Current implementation note: step 2 uses the raw USB host detector in `main.cpp`, with VBUS
+fallback only if host initialization does not come up.
 
 ## ATX PSU control
 
@@ -68,6 +78,16 @@ Optional overrides can be set in [platformio.ini](platformio.ini):
 - `-D STATUS_LED_PIN=...`
 - `-D STATUS_LED_ACTIVE_LOW=1`
 
+## Optional logging
+
+Serial logging can be compiled out entirely with:
+
+```ini
+-D ENABLE_LOGGING=0
+```
+
+Leave it unset or set it to `1` for the current verbose bring-up logs.
+
 ## Build and flash
 
 Install PlatformIO, then:
@@ -82,11 +102,55 @@ cd firmware-esp32s2
 Or from repository root:
 
 ```bash
-./build-esp32s2.sh
-./build-esp32s2.sh --upload --wait-for-port
+./build.sh
+./build.sh --upload --wait-for-port
 ```
 
 ## Notes
 
-- Keep the RP2040 firmware in [firmware](../firmware) if you prefer USB-host-based device detection.
-- If you want true USB host enumeration on ESP32-S2, this can be added later with an ESP-IDF USB host client implementation.
+- The ESP32-S2 target now uses the ESP-IDF USB host library directly for HID wake detection.
+
+## Local pattern capture workflow
+
+Use the helper scripts in [tools](../tools):
+
+1. Install dependency:
+
+```bash
+python3 -m pip install --user hidapi
+```
+
+2. List HID devices and find the dongle VID/PID:
+
+```bash
+python3 tools/capture_hid_reports.py --list
+```
+
+3. Capture idle traffic (controller untouched):
+
+```bash
+python3 tools/capture_hid_reports.py --vid 0xVID --pid 0xPID --output tools/captures/idle.csv --duration 30
+```
+
+4. Capture wake traffic (press controller power / wake action):
+
+```bash
+python3 tools/capture_hid_reports.py --vid 0xVID --pid 0xPID --output tools/captures/wake.csv --duration 30
+```
+
+5. Analyze for candidate wake signatures:
+
+```bash
+python3 tools/analyze_hid_pattern.py --idle tools/captures/idle.csv --wake tools/captures/wake.csv
+```
+
+The analyzer reports wake-only packets and most-active byte positions to help define a compact
+match rule for ESP32 firmware.
+
+6. Optional: run live wake detector on PC:
+
+python3 tools/detect_wakeup_live.py --list
+python3 tools/detect_wakeup_live.py --vid 0xVID --pid 0xPID --iface 1
+
+The detector triggers when it sees a silence-to-burst transition in matching HID report prefixes,
+which is useful for validating the wake rule before embedding it in ESP32 firmware.

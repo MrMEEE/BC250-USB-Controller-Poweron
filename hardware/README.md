@@ -1,43 +1,42 @@
 # Hardware Design
 
-This document originally described the RP2040/Pico prototype. The current ESP32-S2 design keeps
-the same USB mux and power-button ideas, but also adds direct ATX PSU control through the 24-pin
-connector so the board can power the BC250 system up and down.
+This document describes the current ESP32-S2 design, which combines USB mux-based dongle
+monitoring with direct ATX PSU control through the 24-pin connector.
 
 ## Block diagram
 
 ```
- 5VSB (from ATX 24-pin connector)
-   │
-   ├──────────────────────────────► ESP32-S2 5V / regulator input (powers the MCU)
-   │
-   └──────────────────────────────► J1 VBUS    (powers the USB device always)
+ ATX 24-pin connector
+   5VSB (purple) ─────────────────────────────► ESP32-S2 5V / regulator input
+           │
+           └──────────────────────────────────► J1 VBUS  (controller powered while BC250 is off)
 
- ATX 24-pin
-   PS_ON# (green) ── driver transistor/MOSFET ──► ESP32-S2 GPIO16
-   GND    (black) ──────────────────────────────► ESP32-S2 GND
+   PS_ON# (green) ────────────────► Q2 collector
+   GND   (black) ─────────────────► ESP32-S2 GND / Q1 emitter / Q2 emitter
 
- J1 (USB Type-A Female — device input)
-   │ D+/D─
-   ▼
- U2  TS3USB221  2:1 USB switch
-   ├─ Port A (D+/D─) ──────────────► ESP32-S2 / monitor-side path
-   └─ Port B (D+/D─) ──────────────► J2 D+/D─        (PC passthrough path)
-   SEL ◄──────────────────────────── ESP32-S2 GPIO15
+ ESP32-S2
+   GPIO8  ── R4 (1 kΩ) ───────────► Q2 base         (ATX PSU enable)
+   GPIO10 ─────────────────────────► U2 SEL         (0 = ESP32 monitor path, 1 = BC250 path)
+   GPIO13 ── R1 (1 kΩ) ───────────► Q1 base         (BC250 power button pulse)
+   GPIO9  ◄──────────────────────── divider R2/R3   (BC250 USB VBUS sense)
+   USB monitor path ───────────────► HID wake-pattern detection
 
- J2 (USB Type-A Male or header pins — to BC250 USB port)
-   VBUS ─── R2 ─── node ─── R3 ─── GND
-                    │
-                    └──────────────► ESP32-S2 GPIO14  (BC250 VBUS sense)
+ J1 (USB Type-A Female, controller input)
+   VBUS ───────────────────────────► always-on from 5VSB
+   D+ / D- ───────────────────────► U2 common port
 
- J1 VBUS ─── R4 ─── node ─── R5 ─── GND
-                    │
-                    └──────────────► ESP32-S2 GPIO12  (controller VBUS sense)
+ U2 TS3USB221 USB 2:1 switch
+   Port A D+ / D- ────────────────► ESP32-S2 monitor-side path
+   Port B D+ / D- ────────────────► J2 D+ / D- (BC250 passthrough path)
 
- ESP32-S2 GPIO13 ─── R1(1 kΩ) ─── Q1 Base
-                                 Q1 Collector ──► J3 pin 1  (BC250 PWR_BTN)
-                                 Q1 Emitter   ──► GND
- J3 pin 2 ──► GND                              (BC250 PWR_BTN return)
+ J2 (USB Type-A Male or header, to BC250 USB port)
+   VBUS ── R2 ── node ── R3 ── GND
+                  │
+                  └────────────────────────────► ESP32-S2 GPIO9
+
+ J3 (BC250 front-panel power button header)
+   pin 1 ─────────────────────────► Q1 collector
+   pin 2 ─────────────────────────► GND
 ```
 
 ---
@@ -48,10 +47,9 @@ connector so the board can power the BC250 system up and down.
 
 The current prototype uses an ESP32-S2 board because:
 - It is already available in this build.
-- It has enough GPIOs for USB mux control, BC250 power-button drive, controller VBUS sense,
-  BC250 VBUS sense, and ATX PSU enable.
-- USB host enumeration is not required for the current design because controller power-on is
-  detected through VBUS presence.
+- It has enough GPIOs for USB mux control, BC250 power-button drive, BC250 VBUS sense,
+  and ATX PSU enable.
+- It can run the wake detector logic derived from captured HID report patterns.
 - It includes a usable onboard LED for host online/offline indication.
 
 ### U2 — TI TS3USB221
@@ -60,7 +58,11 @@ A 2:1 USB 2.0 bidirectional mux/switch.
 
 If using the common TS3USB221 breakout module sold on AliExpress and similar sites,
 the `S` select control may be exposed as a small pad on the back side of the breakout
-rather than on the main header edge. Check both sides of the board before wiring GP15.
+rather than on the main header edge. Check both sides of the board before wiring GPIO10.
+
+Important: on the breakout used for this project, the enable pin is effectively active-low.
+`OE` must be tied to `GND` or the USB path remains disconnected and the ESP32-S2 host stack
+will see `0 devices` regardless of the `S`/`SEL` state.
 
 | Pin  | Connection                                     |
 |------|------------------------------------------------|
@@ -68,12 +70,18 @@ rather than on the main header edge. Check both sides of the board before wiring
 | GND  | GND                                            |
 | D+   | Device D+  (J1 pin 3) — common port            |
 | D─   | Device D─  (J1 pin 2) — common port            |
-| 1D+  | Pico USB D+ (monitoring path)                  |
-| 1D─  | Pico USB D─ (monitoring path)                  |
-| 2D+  | PC D+       (passthrough path)                 |
-| 2D─  | PC D─       (passthrough path)                 |
-| S    | Pico GP15  (0 = port 1 / Pico, 1 = port 2 / PC) |
-| OE   | VCC — active-HIGH enable; tie HIGH to always enable |
+| 1D+  | ESP32 monitor-side D+ path                     |
+| 1D─  | ESP32 monitor-side D─ path                     |
+| 2D+  | BC250 passthrough D+ path                      |
+| 2D─  | BC250 passthrough D─ path                      |
+| S    | ESP32-S2 GPIO10 (0 = monitor path, 1 = BC250 passthrough path) |
+| OE   | GND — required on this breakout to keep the switch enabled |
+
+Confirmed bring-up note:
+- `S`/`SEL` chooses which downstream path is connected.
+- `OE` must be asserted separately; on the tested breakout this means pulling `OE` low.
+- If `OE` is left floating or tied incorrectly, firmware logs show USB host startup but repeated
+  `initial scan: 0 devices` / `scan: 0 devices` with no dongle enumeration.
 
 Alternatives: **FSUSB42MX** (ON Semi), **PI3USB9281** (Diodes Inc.).  
 Package: VSON (DRC) 10-pin 3×3 mm, or UQFN (RSE) 10-pin 2×1.5 mm.
@@ -89,7 +97,7 @@ as pressing the front-panel power button does.
 
 Add a second transistor or small MOSFET stage between the ESP32-S2 and the ATX `PS_ON#` wire.
 The board must not drive the ATX control line directly. The safe pattern is:
-- ESP32-S2 GPIO16 drives the transistor gate/base
+- ESP32-S2 GPIO8 drives the transistor gate/base
 - The transistor pulls `PS_ON#` into its asserted state
 - ATX ground is shared with the ESP32-S2 ground
 
@@ -98,20 +106,20 @@ This lets the ESP32-S2 turn the PSU on before it pulses the BC250 power button.
 Example with an NPN transistor such as 2N2222 or BC547:
 
 ```
-ESP32-S2 GPIO16 ── R4 (1 kΩ) ──► Q2 base
+ESP32-S2 GPIO8  ── R4 (1 kΩ) ──► Q2 base
 ESP32-S2 GND  ─────────────────► Q2 emitter
 Q2 collector  ─────────────────► ATX PS_ON# (green wire)
 ATX GND       ─────────────────► ESP32-S2 GND (common ground)
 ```
 
 Behavior:
-- GPIO16 LOW: Q2 off, `PS_ON#` released, PSU off
-- GPIO16 HIGH: Q2 on, `PS_ON#` pulled low, PSU on
+- GPIO8 LOW: Q2 off, `PS_ON#` released, PSU off
+- GPIO8 HIGH: Q2 on, `PS_ON#` pulled low, PSU on
 
 That matches the current firmware default. If your driver stage inverts the logic, use the
 `PSU_ON_ACTIVE_LOW` firmware option instead of changing the hardware notes.
 
-### Voltage divider R2/R3 and R4/R5 — VBUS sensing
+### Voltage divider R2/R3 — VBUS sensing
 
 USB VBUS is 5 V; ESP32-S2 GPIO is 3.3 V only.
 
@@ -119,8 +127,6 @@ USB VBUS is 5 V; ESP32-S2 GPIO is 3.3 V only.
 R2 = 10 kΩ,  R3 = 10 kΩ
 V_sense = 5 V × 10 / (10 + 10) = 2.5 V   ✓ safely below 3.3 V, clearly > 1.65 V threshold
 ```
-
-Use the same divider values for controller-side VBUS sensing on GPIO12.
 
 ### Power — 5VSB and ATX `PS_ON#`
 
@@ -144,10 +150,9 @@ A 500 mA polyfuse between 5VSB and J1 VBUS protects against a shorted cable.
 | GPIO | Direction | Function                            |
 |------|-----------|-------------------------------------|
 | GPIO13 | OUT     | BC250 power button drive            |
-| GPIO14 | IN      | BC250 USB VBUS sense                |
-| GPIO15 | OUT     | USB switch SEL (0=ESP32 / 1=BC250) |
-| GPIO12 | IN      | Controller-side VBUS sense          |
-| GPIO16 | OUT     | ATX `PS_ON#` driver control         |
+| GPIO9  | IN      | BC250 USB VBUS sense                |
+| GPIO10 | OUT     | USB switch SEL (0=ESP32 / 1=BC250) |
+| GPIO8  | OUT     | ATX `PS_ON#` driver control         |
 
 An onboard LED can be used for host status if its pin does not conflict with the signals above.
 
@@ -155,16 +160,20 @@ An onboard LED can be used for host status if its pin does not conflict with the
 
 ## Prototype wiring (breadboard)
 
+Wiring color convention used in this build:
+- BC250 power button (J3/Q1 path): red wire
+- BC250 USB/power sense (J2 VBUS divider to GPIO9): blue wire
+
 For a quick prototype without a custom PCB:
 
-1. Use a Pico or Pico W.
+1. Use an ESP32-S2 board (for example LOLIN S2 Mini).
 2. Wire the TS3USB221 on a breakout board or hand-solder it to a SOIC adapter.
 3. For the device connector, break out a USB-A Female port module (common on eBay/LCSC).
-4. For the PC connection, solder a USB-A Male cable end (or use a USB-A to pin-header
+4. For the BC250 connection, solder a USB-A Male cable end (or use a USB-A to pin-header
    breakout).
-5. Tap 5VSB from any Molex 4-pin connector on the ATX PSU (yellow = 12 V, red = 5 V).
-   **Use the red (5 V) wire — not yellow.**
-6. Use a Berg/Dupont 2-pin connector on J3 to clip onto the motherboard PWR_BTN header.
+5. Tap ATX 24-pin standby power from 5VSB (purple wire) and common GND (black wire).
+6. Route ATX `PS_ON#` (green wire) through the Q2 transistor stage.
+7. Use a Berg/Dupont 2-pin connector on J3 to clip onto the motherboard PWR_BTN header.
 
 ---
 
@@ -175,4 +184,4 @@ For a quick prototype without a custom PCB:
 - Place decoupling caps (100 nF) on VCC of U2 close to the IC.
 - Silkscreen labels for J3 polarity (PWR_BTN header is not polarised but label anyway).
 - Keep the ATX `PS_ON#` driver physically close to the 24-pin connector entry.
-- Consider test pads for `5VSB`, `PS_ON#`, `GPIO14` sense, and `GPIO16` control.
+- Consider test pads for `5VSB`, `PS_ON#`, `GPIO9` sense, and `GPIO8` control.

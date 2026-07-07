@@ -1,32 +1,35 @@
 # USB Wake Switch — BC250 / Steam Controller
 
-A small microcontroller-based board that monitors a USB port for device insertion, wakes a
-desktop PC by momentarily shorting the motherboard power button header, then transparently
-routes the USB device to the PC for the remainder of the session. When the PC shuts down the
-board returns to monitoring mode.
+A small ESP32-S2-based board that watches for Steam Controller dongle wake traffic, turns on the
+ATX PSU feeding a BC250 system, pulses the BC250 power button, and then hands the controller's
+USB connection over to the BC250 once the host is actually online. When the BC250 shuts down,
+the board turns the PSU back off and returns the USB path to monitoring mode.
 
-## Why not just leave the device plugged in to the PC?
+## Why not just leave the device plugged in to the BC250?
 
-The BC250 (and similar mini-PCs) do not support USB wake-from-S5.  The controller is
-therefore invisible to the PC until it boots — and by then Steam may have already opened
-without it.  This board solves the chicken-and-egg problem in hardware.
+The BC250 does not wake itself just because the controller is powered. The controller may be on
+while the host and even the PSU are still off, so the BC250 never sees the device in time. This
+board solves that sequencing problem in hardware by sitting between the controller, the BC250,
+and the ATX supply.
 
 ---
 
 ## How it works
 
 ```
-                  ┌─────────────────────────────────────┐
-                  │            RP2040 (Pico)             │
- Steam Controller │                                      │
-  USB Type-A ─────┤─► USB Switch (TS3USB221)             │
-                  │       ├─ SEL=0 ──► Pico USB host     │
-                  │       └─ SEL=1 ──► PC USB port ───►──┤─► PC
-                  │                                      │
-                  │  GP13: PWR_BTN ──► transistor ──► MOB│
-                  │  GP14: PC_VBUS_SENSE ◄─── divider ◄──┤─◄ PC USB VBUS
-                  │  GP15: USB_SWITCH_SEL ──► TS3USB221  │
-                  └─────────────────────────────────────┘
+         ATX 24-pin
+     5VSB ───────────────► ESP32-S2 power
+     PS_ON# ◄───────────── transistor ◄── GPIO8
+                               
+ Steam Controller                                  BC250
+ USB Type-A ──► TS3USB221 USB switch ───────────► USB port
+            ▲              ▲
+            │              └── SEL from GPIO10, OE tied to GND on tested breakout
+            │
+            └── HID wake-pattern detection (monitor path)
+
+ BC250 USB VBUS sense ───────────────────────────► GPIO9
+ BC250 PWR_BTN header ◄── transistor ◄────────── GPIO13
 ```
 
 ### State machine
@@ -34,36 +37,42 @@ without it.  This board solves the chicken-and-egg problem in hardware.
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  MONITORING                                                  │
-│  USB switch → Pico.  TinyUSB host enumerates the device.    │
+│  USB switch → ESP32-S2 monitor path. Watch HID wake pattern.│
 └─────────────────────┬───────────────────────────────────────┘
-                      │ device plugged in
+                      │ wake signature detected
+                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│  WAITING_FOR_PSU                                              │
+│  Assert PS_ON#. Wait 1 s for ATX rails to settle.             │
+└─────────────────────┬───────────────────────────────────────┘
+                      │ 1 second elapsed
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  POWERING_ON                                                 │
-│  Pulse PWR_BTN for 150 ms.  Wait up to 90 s for PC VBUS.    │
+│  Pulse BC250 PWR_BTN. Wait up to 90 s for BC250 USB VBUS.   │
 └──────────┬──────────────────────────────┬───────────────────┘
-           │ PC VBUS high                 │ timeout
+           │ BC250 VBUS high              │ timeout / abort
            ▼                             ▼
 ┌──────────────────────┐      ┌──────────────────────────────┐
 │  PASSTHROUGH         │      │  MONITORING (back to top)    │
-│  USB switch → PC.    │      └──────────────────────────────┘
-│  PC enumerates natively.
-│  Monitor PC VBUS.    │
+│  USB switch → BC250. │      └──────────────────────────────┘
+│  PSU held on. Monitor│
+│  BC250 VBUS.         │
 └──────────┬───────────┘
-           │ PC VBUS gone > 3 s
+           │ BC250 VBUS gone > 3 s
            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  DORMANT                                                     │
-│  USB switch → Pico.  Wait for device to be unplugged so     │
-│  that a future plug-in event is intentional.                 │
+│  PSU off. USB switch → ESP32-S2. Wait for quiet dongle      │
+│  traffic before allowing the next wake trigger.             │
 └─────────────────────┬───────────────────────────────────────┘
-                      │ device unplugged
+                      │ detector re-armed after silence
                       ▼
                   MONITORING
 ```
 
-The DORMANT state prevents the board from immediately re-waking the PC after a normal
-shutdown just because the Steam Controller is still sitting in the USB port.
+The DORMANT state prevents the board from immediately re-waking the BC250 from one continuous
+dongle report burst.
 
 ---
 
@@ -72,31 +81,20 @@ shutdown just because the Steam Controller is still sitting in the USB port.
 ```
 .
 ├── README.md
-├── build.sh             ← root firmware build wrapper (CMake + Pico SDK)
-├── build-esp32s2.sh     ← root firmware build wrapper (PlatformIO + ESP32-S2)
+├── build.sh             ← root firmware build wrapper (PlatformIO + ESP32-S2)
 ├── firmware-esp32s2/
 │   ├── README.md          ← ESP32-S2 build/wiring notes
 │   ├── build.sh           ← ESP32-S2 local build/upload helper
 │   ├── platformio.ini
 │   └── src/
-│       └── main.cpp       ← ESP32-S2 state machine (VBUS-sense device detect)
+│       └── main.cpp       ← ESP32-S2 state machine
 ├── hardware/
 │   ├── README.md          ← schematic description & design notes
 │   └── BOM.md             ← bill of materials
-└── firmware/
-    ├── README.md          ← build & flash instructions
-    ├── CMakeLists.txt
-    ├── platformio.ini     ← optional/experimental
-    └── src/
-        ├── main.c         ← state machine
-        ├── usb_host.c/h   ← TinyUSB host callbacks
-        ├── power_ctrl.c/h ← power button & VBUS sensing
-        └── tusb_config.h  ← TinyUSB compile-time config
 ```
 
-### Firmware targets
+### Firmware target
 
-- RP2040/Pico firmware: [firmware/README.md](firmware/README.md)
 - ESP32-S2 firmware (LOLIN S2 Mini): [firmware-esp32s2/README.md](firmware-esp32s2/README.md)
 
 ---
@@ -104,9 +102,22 @@ shutdown just because the Steam Controller is still sitting in the USB port.
 ## Quick start
 
 1. Wire the hardware per `hardware/README.md`.
-2. Choose firmware target:
-    - RP2040/Pico: run `./build.sh` (or follow [firmware/README.md](firmware/README.md))
-    - ESP32-S2: run `./build-esp32s2.sh` (or follow [firmware-esp32s2/README.md](firmware-esp32s2/README.md))
-3. Connect the Pico's VSYS to the PC's ATX 5VSB rail so the board stays powered when
-   the PC is off.
-4. Plug the Steam Controller into the board's Type-A input jack.
+    Important: on the TS3USB221 breakout used here, `OE` must be tied to `GND` or the ESP32-S2
+    will never see the dongle on its host bus.
+2. Build and flash the ESP32-S2 firmware:
+    - From repo root: `./build.sh`
+    - Or follow [firmware-esp32s2/README.md](firmware-esp32s2/README.md)
+3. Connect the ESP32-S2 to ATX `5VSB` so the board stays powered while the BC250 is off.
+4. Wire the ESP32-S2 PSU driver output to ATX `PS_ON#` through a transistor stage.
+5. Plug the Steam Controller into the board's Type-A input jack.
+
+## Dongle Pattern Discovery
+
+If your controller dongle is always powered, wake detection should be based on HID report
+patterns instead of VBUS. Use:
+
+- [tools/capture_hid_reports.py](tools/capture_hid_reports.py)
+- [tools/analyze_hid_pattern.py](tools/analyze_hid_pattern.py)
+
+to capture idle vs wake traffic on a local PC and extract a wake signature to port into ESP32
+firmware logic.
