@@ -54,6 +54,10 @@
 #define STATUS_LED_ACTIVE_LOW 0
 #endif
 
+#ifndef POST_SHUTDOWN_COOLDOWN_MS
+#define POST_SHUTDOWN_COOLDOWN_MS 10000U
+#endif
+
 static constexpr uint32_t PSU_SETTLE_DELAY_MS = 1000U;
 static constexpr uint32_t PWR_BTN_PULSE_MS = 150U;
 static constexpr uint32_t HOST_BOOT_TIMEOUT_MS = 90000U;
@@ -89,6 +93,7 @@ static uint32_t s_status_led_last_toggle_ms = 0;
 static bool s_hid_target_present = false;
 static bool s_hid_detector_armed = true;
 static bool s_hid_wake_pending = false;
+static uint32_t s_post_shutdown_cooldown_until_ms = 0;
 static uint32_t s_hid_last_match_ms = 0;
 static uint32_t s_hid_burst_start_ms = 0;
 static uint8_t s_hid_burst_count = 0;
@@ -176,6 +181,10 @@ static inline bool fallback_device_vbus_present() {
 }
 
 static inline bool wake_event_detected() {
+  if (s_post_shutdown_cooldown_until_ms != 0 && millis() < s_post_shutdown_cooldown_until_ms) {
+    return false;
+  }
+
   if (!s_hid_host_ready) {
     return fallback_device_vbus_present();
   }
@@ -211,6 +220,12 @@ static void hid_reset_detector_state() {
   s_hid_last_match_ms = 0;
   s_hid_burst_start_ms = 0;
   s_hid_burst_count = 0;
+}
+
+static void start_post_shutdown_cooldown(uint32_t now) {
+  s_post_shutdown_cooldown_until_ms = now + POST_SHUTDOWN_COOLDOWN_MS;
+  LOGF("[fsm] post-shutdown cooldown active until %lu ms\n",
+       static_cast<unsigned long>(s_post_shutdown_cooldown_until_ms));
 }
 
 static void hid_note_matching_report(uint32_t now) {
@@ -764,6 +779,7 @@ void loop() {
     case STATE_DORMANT:
       if (!device_present()) {
         LOGLN("[fsm] device removed - ready to monitor again");
+        start_post_shutdown_cooldown(now);
         transition(STATE_MONITORING);
       }
       break;
