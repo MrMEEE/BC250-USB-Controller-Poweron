@@ -54,6 +54,10 @@
 #define STATUS_LED_ACTIVE_LOW 0
 #endif
 
+#ifndef ENABLE_POST_SHUTDOWN_COOLDOWN
+#define ENABLE_POST_SHUTDOWN_COOLDOWN 1
+#endif
+
 #ifndef POST_SHUTDOWN_COOLDOWN_MS
 #define POST_SHUTDOWN_COOLDOWN_MS 10000U
 #endif
@@ -181,7 +185,9 @@ static inline bool fallback_device_vbus_present() {
 }
 
 static inline bool wake_event_detected() {
-  if (s_post_shutdown_cooldown_until_ms != 0 && millis() < s_post_shutdown_cooldown_until_ms) {
+  if (ENABLE_POST_SHUTDOWN_COOLDOWN &&
+      s_post_shutdown_cooldown_until_ms != 0 &&
+      millis() < s_post_shutdown_cooldown_until_ms) {
     return false;
   }
 
@@ -223,6 +229,11 @@ static void hid_reset_detector_state() {
 }
 
 static void start_post_shutdown_cooldown(uint32_t now) {
+  if (!ENABLE_POST_SHUTDOWN_COOLDOWN) {
+    s_post_shutdown_cooldown_until_ms = 0;
+    return;
+  }
+
   s_post_shutdown_cooldown_until_ms = now + POST_SHUTDOWN_COOLDOWN_MS;
   LOGF("[fsm] post-shutdown cooldown active until %lu ms\n",
        static_cast<unsigned long>(s_post_shutdown_cooldown_until_ms));
@@ -769,7 +780,8 @@ void loop() {
           set_psu_enabled(false);
           switch_to_monitor_path();
           s_host_lost_at_ms = 0;
-          transition(STATE_DORMANT);
+          start_post_shutdown_cooldown(now);
+          transition(STATE_MONITORING);
         }
       } else {
         s_host_lost_at_ms = 0;
@@ -777,11 +789,7 @@ void loop() {
       break;
 
     case STATE_DORMANT:
-      if (!device_present()) {
-        LOGLN("[fsm] device removed - ready to monitor again");
-        start_post_shutdown_cooldown(now);
-        transition(STATE_MONITORING);
-      }
+      transition(STATE_MONITORING);
       break;
   }
 
